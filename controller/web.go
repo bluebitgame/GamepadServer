@@ -41,7 +41,7 @@ func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ClientName := string(msgJson)
-	Notification(ClientName+" Connected", conn.RemoteAddr().String())
+	Notification(ClientName, "Connected from "+conn.RemoteAddr().String())
 
 	emulator, err := NewEmulator(func(vibration Vibration) {})
 	if err != nil {
@@ -65,6 +65,8 @@ func wsEndpoint(w http.ResponseWriter, r *http.Request) {
 	if err = conn.WriteMessage(msgType, msgJson); err != nil {
 		return
 	}
+
+	defer Notification(ClientName, "Disconnected")
 
 	for {
 		_, msgJson, err := conn.ReadMessage()

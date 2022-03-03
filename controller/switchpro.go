@@ -1,8 +1,8 @@
 package controller
 
 import (
+	"encoding/binary"
 	"fmt"
-	"math"
 
 	"github.com/boombuler/hid"
 )
@@ -116,8 +116,62 @@ func NewSwitchProController(DeviceInfo *hid.DeviceInfo) {
 			LeftThumbX, LeftThumbY := controller.StickCalLeft.StickCalibrate(uint16(raw_buf[7]&0xF)<<8|uint16(raw_buf[6]), (uint16(raw_buf[8])<<4)|uint16(raw_buf[7]>>4))
 			RightThumbX, RightThumbY := controller.StickCalRight.StickCalibrate(uint16(raw_buf[10]&0xF)<<8|uint16(raw_buf[9]), (uint16(raw_buf[11])<<4)|uint16(raw_buf[10]>>4))
 
-			report.SetLeftThumb(LeftThumbX, LeftThumbY)
-			report.SetRightThumb(RightThumbX, RightThumbY)
+			if ButtonsL&(1<<SwitchProControllerButtonLeftTrigger) != 0 {
+				var gyr_x float32 = 0.0
+				var gyr_y float32 = 0.0
+				for i := 0; i < 3; i++ {
+					var acc_r, gyr_r [3]int16
+					acc_r[0] = int16(binary.LittleEndian.Uint16(raw_buf[13+i*12:]))
+					acc_r[1] = int16(binary.LittleEndian.Uint16(raw_buf[15+i*12:]))
+					acc_r[2] = int16(binary.LittleEndian.Uint16(raw_buf[17+i*12:]))
+					gyr_r[0] = int16(binary.LittleEndian.Uint16(raw_buf[19+i*12:]))
+					gyr_r[1] = int16(binary.LittleEndian.Uint16(raw_buf[21+i*12:]))
+					gyr_r[2] = int16(binary.LittleEndian.Uint16(raw_buf[23+i*12:]))
+
+					gyr_x += float32(gyr_r[2]) / 2048.0
+					gyr_y += float32(gyr_r[1]) / 2048.0
+				}
+
+				if gyr_x > 0.0 {
+					gyr_x += 0.1
+				} else {
+					gyr_x -= 0.1
+				}
+				if gyr_y > 0.0 {
+					gyr_y += 0.1
+				} else {
+					gyr_y -= 0.1
+				}
+				RightThumbX -= gyr_x
+				RightThumbY -= gyr_y
+			}
+
+			if LeftThumbX > 1.0 {
+				LeftThumbX = 1.0
+			} else if LeftThumbX < -1.0 {
+				LeftThumbX = -1.0
+			}
+
+			if LeftThumbY > 1.0 {
+				LeftThumbY = 1.0
+			} else if LeftThumbY < -1.0 {
+				LeftThumbY = -1.0
+			}
+
+			if RightThumbX > 1.0 {
+				RightThumbX = 1.0
+			} else if RightThumbX < -1.0 {
+				RightThumbX = -1.0
+			}
+
+			if RightThumbY > 1.0 {
+				RightThumbY = 1.0
+			} else if RightThumbY < -1.0 {
+				RightThumbY = -1.0
+			}
+
+			report.SetLeftThumb(int16(LeftThumbX*32767), int16(LeftThumbY*32767))
+			report.SetRightThumb(int16(RightThumbX*32767), int16(RightThumbY*32767))
 
 			ctr.Send(&report)
 		}
@@ -130,6 +184,10 @@ type SwitchProController struct {
 	CommmandID    byte
 	StickCalLeft  StickCalibration
 	StickCalRight StickCalibration
+	AccNeutral    [3]uint16
+	AccSensiti    [3]uint16
+	GyrNeutral    [3]uint16
+	GyrSensiti    [3]uint16
 }
 
 func (Controller *SwitchProController) Init() error {
@@ -176,6 +234,38 @@ func (Controller *SwitchProController) Init() error {
 		return err
 	}
 	Controller.StickCalRight.DeadZone = uint16(response[4]&0xF)<<8 | uint16(response[3])
+
+	response, err = Controller.ReadSPI([]byte{0x20, 0x60, 0x00, 0x00, 10})
+	if err != nil {
+		return err
+	}
+	Controller.AccNeutral[0] = binary.LittleEndian.Uint16(response[0:2])
+	Controller.AccNeutral[1] = binary.LittleEndian.Uint16(response[2:4])
+	Controller.AccNeutral[2] = binary.LittleEndian.Uint16(response[4:6])
+
+	response, err = Controller.ReadSPI([]byte{0x26, 0x60, 0x00, 0x00, 10})
+	if err != nil {
+		return err
+	}
+	Controller.AccSensiti[0] = binary.LittleEndian.Uint16(response[0:2])
+	Controller.AccSensiti[1] = binary.LittleEndian.Uint16(response[2:4])
+	Controller.AccSensiti[2] = binary.LittleEndian.Uint16(response[4:6])
+
+	response, err = Controller.ReadSPI([]byte{0x2C, 0x60, 0x00, 0x00, 10})
+	if err != nil {
+		return err
+	}
+	Controller.GyrNeutral[0] = binary.LittleEndian.Uint16(response[0:2])
+	Controller.GyrNeutral[1] = binary.LittleEndian.Uint16(response[2:4])
+	Controller.GyrNeutral[2] = binary.LittleEndian.Uint16(response[4:6])
+
+	response, err = Controller.ReadSPI([]byte{0x32, 0x60, 0x00, 0x00, 10})
+	if err != nil {
+		return err
+	}
+	Controller.GyrSensiti[0] = binary.LittleEndian.Uint16(response[0:2])
+	Controller.GyrSensiti[1] = binary.LittleEndian.Uint16(response[2:4])
+	Controller.GyrSensiti[2] = binary.LittleEndian.Uint16(response[4:6])
 
 	// Set Player LED
 	_, err = Controller.Subcommand(0x30, []byte{1})
@@ -248,36 +338,24 @@ type StickCalibration struct {
 	DeadZone uint16
 }
 
-func (StickCal StickCalibration) StickCalibrate(ThumbX uint16, ThumbY uint16) (int16, int16) {
-	x := float64(ThumbX) - float64(StickCal.CenterX)
-	y := float64(ThumbY) - float64(StickCal.CenterY)
-	if math.Abs(x*x+y*y) < float64(StickCal.DeadZone*StickCal.DeadZone) {
-		return 0, 0
+func (StickCal StickCalibration) StickCalibrate(ThumbX uint16, ThumbY uint16) (float32, float32) {
+	x := float32(ThumbX) - float32(StickCal.CenterX)
+	y := float32(ThumbY) - float32(StickCal.CenterY)
+	if x*x+y*y < float32(StickCal.DeadZone*StickCal.DeadZone) {
+		return 0.0, 0.0
 	}
 
 	if x > 0.0 {
-		x /= float64(StickCal.MaxX)
-		if x > 1.0 {
-			x = 1.0
-		}
+		x /= float32(StickCal.MaxX)
 	} else {
-		x /= float64(StickCal.MinX)
-		if x < -1.0 {
-			x = -1.0
-		}
+		x /= float32(StickCal.MinX)
 	}
 
 	if y > 0.0 {
-		y /= float64(StickCal.MaxY)
-		if y > 1.0 {
-			y = 1.0
-		}
+		y /= float32(StickCal.MaxY)
 	} else {
-		y /= float64(StickCal.MinY)
-		if y < -1.0 {
-			y = -1.0
-		}
+		y /= float32(StickCal.MinY)
 	}
 
-	return int16(x * 32767), int16(y * 32767)
+	return x, y
 }
